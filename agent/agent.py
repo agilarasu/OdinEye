@@ -128,21 +128,68 @@ def get_installed_apps() -> list:
                 except (subprocess.CalledProcessError, FileNotFoundError):
                     pass
         elif platform.system() == "Windows":
+            # Use registry (reliable on Windows 11; wmic is deprecated)
             try:
-                flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
-                out = subprocess.check_output(
-                    ["wmic", "product", "get", "name"],
-                    creationflags=flags,
-                    timeout=15,
-                )
-                names = [
-                    n.strip() for n in out.decode("utf-16-le", errors="ignore").split("\n")
-                    if n.strip() and n.strip().lower() != "name"
+                import winreg
+                uninstall_paths = [
+                    (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+                    (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+                    (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
                 ]
-                for n in names[:50]:
-                    apps.append({"name": n, "version": ""})
-            except Exception:
+                for hkey, uninstall_path in uninstall_paths:
+                    try:
+                        uninstall_key = winreg.OpenKey(hkey, uninstall_path)
+                        for i in range(winreg.QueryInfoKey(uninstall_key)[0]):
+                            sub = None
+                            try:
+                                subname = winreg.EnumKey(uninstall_key, i)
+                                sub = winreg.OpenKey(uninstall_key, subname)
+                                name = winreg.QueryValueEx(sub, "DisplayName")[0]
+                                ver = ""
+                                try:
+                                    ver = winreg.QueryValueEx(sub, "DisplayVersion")[0] or ""
+                                except OSError:
+                                    pass
+                                if name and name not in seen:
+                                    seen.add(name)
+                                    apps.append({"name": str(name), "version": str(ver)})
+                                    if len(apps) >= 150:
+                                        break
+                            except (OSError, TypeError):
+                                pass
+                            finally:
+                                if sub is not None:
+                                    try:
+                                        winreg.CloseKey(sub)
+                                    except OSError:
+                                        pass
+                        winreg.CloseKey(uninstall_key)
+                        if len(apps) >= 150:
+                            break
+                    except OSError:
+                        continue
+            except ImportError:
                 pass
+            # Fallback to wmic if registry failed and no apps collected
+            if not apps:
+                try:
+                    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+                    out = subprocess.check_output(
+                        ["wmic", "product", "get", "name"],
+                        creationflags=flags,
+                        timeout=30,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    names = [
+                        n.strip() for n in out.decode("utf-16-le", errors="ignore").split("\n")
+                        if n.strip() and n.strip().lower() != "name"
+                    ]
+                    for n in names[:100]:
+                        if n not in seen:
+                            seen.add(n)
+                            apps.append({"name": n, "version": ""})
+                except Exception:
+                    pass
         elif platform.system() == "Darwin":
             try:
                 out = subprocess.check_output(
